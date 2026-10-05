@@ -28,9 +28,11 @@ def _from_u32(data: list[int]) -> int:
 class FakeBoard:
     """One I2C-HAT: channel state plus the persistent registers.
 
-    ``safety_mask``, ``polarity`` and ``irq_enable`` select whether the
-    firmware has those registers; without them it answers filler, like older
-    firmware does.
+    ``safety_mask``, ``polarity``, ``irq`` and ``irq_enable`` select whether
+    the firmware has those registers; without them it answers filler, like
+    older firmware does. Without ``irq_enable`` (before 3.0.0) the capture
+    queue follows the old rules: the edge masks alone arm it and are
+    volatile, and reading the inputs releases the interrupt line.
     """
 
     def __init__(
@@ -40,14 +42,16 @@ class FakeBoard:
         *,
         safety_mask: bool = True,
         polarity: bool = True,
+        irq: bool = True,
         irq_enable: bool = True,
     ) -> None:
         info = BOARDS[model]
-        self.has_irq = info.has_irq
+        self.has_irq = info.has_irq and irq
         self.irq_enable = irq_enable
         self.rising_mask = 0
         self.falling_mask = 0
-        self.armed = False
+        self._enabled = False
+        self.line_released = False
         self.queue: list[int] = []
         #: Called when this board starts pulling the interrupt line low.
         self.on_assert: Callable[[], None] | None = None
@@ -72,9 +76,24 @@ class FakeBoard:
         self.writes: list[tuple[str, int]] = []
 
     @property
+    def armed(self) -> bool:
+        """Whether edges are captured."""
+        if self.irq_enable:
+            return self._enabled
+        return bool(self.rising_mask | self.falling_mask)
+
+    @armed.setter
+    def armed(self, value: bool) -> None:
+        self._enabled = value
+
+    @property
     def line_asserted(self) -> bool:
-        """The interrupt line is low exactly while armed with captures pending."""
-        return self.armed and bool(self.queue)
+        """The interrupt line is low while armed with captures pending.
+
+        Before 3.0.0 an input read releases it regardless, until the next
+        capture.
+        """
+        return self.armed and bool(self.queue) and not self.line_released
 
     def set_inputs(self, value: int) -> None:
         """Drive the inputs: counts the edges and captures them if armed."""
@@ -93,6 +112,7 @@ class FakeBoard:
                 self.queue.pop(0)
                 self.status |= StatusWordBits.DI_IRQ_CAPTURE_QUEUE_FULL.value
             self.queue.append(value << 16 | edges)
+            self.line_released = False
             if not was_asserted and self.on_assert is not None:
                 self.on_assert()
 
@@ -101,7 +121,9 @@ class FakeBoard:
         mask = self.safety_mask if self.safety_mask is not None else -1
         self.outputs = (self.outputs & ~mask) | (self.safety_value & mask)
         self.status |= StatusWordBits.CWDT_TIMEOUT.value
-        self._disarm()
+        if self.irq_enable:
+            self._enabled = False
+            self.queue.clear()
 
     def power_cycle(self) -> None:
         """Power loss: outputs to the power-on value, counters to zero."""
@@ -109,11 +131,10 @@ class FakeBoard:
         self.rising = [0] * self.di_count
         self.falling = [0] * self.di_count
         self.status |= StatusWordBits.POR_RESET.value
-        self._disarm()
-
-    def _disarm(self) -> None:
-        self.armed = False
+        self._enabled = False
         self.queue.clear()
+        if not self.irq_enable:
+            self.rising_mask = self.falling_mask = 0
 
     def _irq(self, cmd: Command, data: list[int]) -> list[int] | None:
         register = IrqRegister(data[0])
@@ -123,13 +144,13 @@ class FakeBoard:
             value = _from_u32(data[1:])
             match register:
                 case IrqRegister.DI_RISING_EDGE_CONTROL:
-                    self.rising_mask = self._persist("rising_mask", data[1:])
+                    self.rising_mask = self._mask_write("rising_mask", data[1:])
                 case IrqRegister.DI_FALLING_EDGE_CONTROL:
-                    self.falling_mask = self._persist("falling_mask", data[1:])
+                    self.falling_mask = self._mask_write("falling_mask", data[1:])
                 case IrqRegister.DI_CAPTURE:
                     self.queue.clear()
                 case IrqRegister.DI_GLOBAL_ENABLE:
-                    self.armed = bool(value)
+                    self._enabled = bool(value)
                     if not value:
                         self.queue.clear()
             return data
@@ -166,6 +187,8 @@ class FakeBoard:
         if self.di_count:
             match cmd:
                 case Command.DI_GET_ALL_CHANNEL_STATES:
+                    if not self.irq_enable:
+                        self.line_released = True
                     return _u32(self.inputs)
                 case Command.DI_GET_COUNTER:
                     index, kind = data
@@ -208,6 +231,10 @@ class FakeBoard:
         value = _from_u32(data)
         self.writes.append((register, value))
         return value
+
+    def _mask_write(self, register: str, data: list[int]) -> int:
+        # Edge masks are EEPROM-backed from 3.0.0 only.
+        return self._persist(register, data) if self.irq_enable else _from_u32(data)
 
 
 class FakeBus:

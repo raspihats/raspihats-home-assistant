@@ -215,6 +215,9 @@ class RaspihatsCoordinator(DataUpdateCoordinator[BoardState]):
             # The next poll reports the board as unavailable if it stays so.
             self.logger.debug("%s: reading captured edges failed: %s", self.name, err)
             return
+        self.logger.debug(
+            "%s: %d edge(s) read on the interrupt line", self.name, len(captures)
+        )
         self._replay(captures)
 
     async def async_disarm(self) -> None:

@@ -200,7 +200,13 @@ async def test_options_follow_the_firmware(
     )
     result = await hass.config_entries.options.async_init(entry.entry_id)
     fields = {str(key) for key in result["data_schema"].schema}
-    assert fields == {"poll_interval", "watchdog_timeout", "safe_on", "power_on"}
+    assert fields == {
+        "poll_interval",
+        "watchdog_timeout",
+        "safe_on",
+        "power_on",
+        "irq_gpio",
+    }
 
 
 async def test_input_board_options(
@@ -271,10 +277,19 @@ async def test_input_board_asks_for_the_interrupt_line(
 
 
 @pytest.mark.usefixtures("no_setup")
-async def test_old_input_firmware_skips_the_interrupt_line(
+async def test_2x_input_firmware_is_asked_too(
     hass: HomeAssistant, bus: FakeBus
 ) -> None:
-    bus.add(0x40, FakeBoard("DI16ac", firmware=(2, 2, 0), irq_enable=False))
+    bus.add(0x40, FakeBoard("DI16ac", firmware=(2, 1, 2), irq_enable=False))
+    result = await _add_input_board(hass, "DI16ac", "0x40")
+    assert result["step_id"] == "interrupts"
+
+
+@pytest.mark.usefixtures("no_setup")
+async def test_no_capture_queue_no_interrupt_line(
+    hass: HomeAssistant, bus: FakeBus
+) -> None:
+    bus.add(0x40, FakeBoard("DI16ac", firmware=(2, 0, 1), irq=False))
     result = await _add_input_board(hass, "DI16ac", "0x40")
     assert result["type"] is FlowResultType.CREATE_ENTRY
     assert result["result"].options == {}

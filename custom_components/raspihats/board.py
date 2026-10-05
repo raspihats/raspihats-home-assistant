@@ -59,9 +59,12 @@ class BoardIdentity:
     outputs: tuple[str, ...]
     has_safety_mask: bool
     has_input_polarity: bool
-    #: The capture queue with its arming bit (firmware 3.0.0 and later), which
-    #: is what drives the interrupt line.
+    #: The capture queue, which drives the interrupt line.
     has_irq: bool = False
+    #: Firmware 3.0.0 and later: an arming bit gates the queue and the edge
+    #: masks are persistent. Before that the masks alone arm it, they are
+    #: volatile, and reading the inputs releases the interrupt line.
+    has_irq_enable: bool = False
 
 
 @dataclass(frozen=True)
@@ -116,6 +119,9 @@ class Board:
         inputs = tuple(info.labels.get("di", ()))
         outputs = tuple(info.labels.get("dq", ()))
         self._hat = hat
+        has_irq = info.has_irq and _supported(
+            lambda: hat.di.irq_reg.rising_edge_control
+        )
         self.identity = BoardIdentity(
             model=self.model,
             firmware=firmware,
@@ -123,7 +129,8 @@ class Board:
             outputs=outputs,
             has_safety_mask=bool(outputs) and _supported(lambda: hat.dq.safety_mask),
             has_input_polarity=bool(inputs) and _supported(lambda: hat.di.polarity),
-            has_irq=info.has_irq and _supported(lambda: hat.di.irq_reg.global_enable),
+            has_irq=has_irq,
+            has_irq_enable=has_irq and _supported(lambda: hat.di.irq_reg.global_enable),
         )
         return self.identity
 
@@ -132,18 +139,24 @@ class Board:
     ) -> BoardState:
         """Read the channel states, the status word and the given counters.
 
-        With ``drain``, the capture queue is emptied first, so the edges come
-        before the states they led to. Any valid frame feeds the board's
-        communication watchdog, so this poll is also what keeps the outputs
-        out of their safe state.
+        With ``drain``, the capture queue is emptied too. That comes after
+        the input read, because before firmware 3.0.0 reading the inputs
+        releases the interrupt line even with captures still queued: draining
+        afterwards picks those up, and an empty queue makes the next capture
+        assert the line again. The last capture is then the newest input
+        state there is. Any valid frame feeds the board's communication
+        watchdog, so this poll is also what keeps the outputs out of their
+        safe state.
         """
         hat = self._hat
         identity = self._identity
         status = _call(lambda: hat.status.value)
-        captures = tuple(self.drain_captures()) if drain else ()
         inputs = outputs = None
         if identity.inputs:
             inputs = _call(lambda: hat.di.value) & _mask(identity.inputs)
+        captures = tuple(self.drain_captures()) if drain else ()
+        if captures:
+            inputs = captures[-1]
         if identity.outputs:
             outputs = _call(lambda: hat.dq.value) & _mask(identity.outputs)
         values = {}
@@ -155,13 +168,20 @@ class Board:
     def arm_irq(self) -> list[str]:
         """Capture every edge of every input, then arm the capture queue.
 
-        The edge masks live in EEPROM, so they are written only when they
-        differ. The arming bit is volatile and clears on a board reset or a
-        watchdog trip, which is why this runs again after either. Arming comes
-        last, so the board never captures with half-set masks.
+        Returns the persistent writes made. From firmware 3.0.0 the edge masks
+        live in EEPROM, so they are written only when they differ, and the
+        volatile arming bit comes last, so the board never captures with
+        half-set masks. Before 3.0.0 the masks are volatile and are what arms
+        the queue. Either way the arming is lost on a board reset (and from
+        3.0.0 on a watchdog trip), which is why this runs again after both.
         """
         registers = self._hat.di.irq_reg
         everything = _mask(self._identity.inputs)
+        if not self._identity.has_irq_enable:
+            _call(setattr, registers, "rising_edge_control", everything)
+            _call(setattr, registers, "falling_edge_control", everything)
+            _call(setattr, registers, "capture", 0)
+            return []
         changed = []
         for name in ("rising_edge_control", "falling_edge_control"):
             have = _call(getattr, registers, name)
@@ -174,7 +194,15 @@ class Board:
 
     def disarm_irq(self) -> None:
         """Disarm: the queue is dropped and the interrupt line released."""
-        _call(setattr, self._hat.di.irq_reg, "global_enable", 0)
+        registers = self._hat.di.irq_reg
+        if self._identity.has_irq_enable:
+            _call(setattr, registers, "global_enable", 0)
+            return
+        # Before 3.0.0, zeroing the masks stops capturing, but captures left
+        # in the queue would keep holding the line, so it is cleared too.
+        _call(setattr, registers, "rising_edge_control", 0)
+        _call(setattr, registers, "falling_edge_control", 0)
+        _call(setattr, registers, "capture", 0)
 
     def drain_captures(self) -> list[int]:
         """Empty the capture queue; the input states at each edge, oldest first.

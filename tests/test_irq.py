@@ -176,6 +176,64 @@ async def test_overflow_is_reported(
     assert hass.states.get("binary_sensor.di16ac_0x40_i0").state == STATE_ON
 
 
+OLD = {"firmware": (2, 1, 2), "irq_enable": False, "polarity": False}
+
+
+async def test_2x_armed_by_masks_alone(
+    hass: HomeAssistant, setup_board: SetupBoard, gpio: list[FakeLine]
+) -> None:
+    entry, board = await setup_board("DI16ac", options=IRQ, **OLD)
+    assert board.armed
+    assert board.rising_mask == board.falling_mask == 0xFFFF
+    # Volatile on 2.x: nothing goes to EEPROM.
+    assert board.writes == []
+
+    seen = _record(hass, I3)
+    board.set_inputs(1 << 3)
+    board.set_inputs(0)
+    await until(lambda: len(seen) == 2)
+    assert seen == [STATE_ON, STATE_OFF]
+
+    assert await hass.config_entries.async_unload(entry.entry_id)
+    assert board.rising_mask == board.falling_mask == 0
+    assert not board.queue
+    assert gpio[0].released
+
+
+async def test_2x_input_read_does_not_strand_captures(
+    hass: HomeAssistant, setup_board: SetupBoard, gpio: list[FakeLine], poll
+) -> None:
+    _, board = await setup_board("DI16ac", options=IRQ, **OLD)
+    seen = _record(hass, I3)
+
+    # An edge lands, and a poll reads the inputs before the interrupt is
+    # served. On 2.x that read releases the line with the capture queued.
+    board.set_inputs(1 << 3)
+    await poll()
+    assert seen == [STATE_ON]
+    assert not board.queue
+
+    # The queue was drained, so the next edge asserts the line again.
+    board.set_inputs(0)
+    await until(lambda: len(seen) == 2)
+    assert seen == [STATE_ON, STATE_OFF]
+
+
+async def test_2x_rearmed_after_power_loss(
+    hass: HomeAssistant, setup_board: SetupBoard, gpio: list[FakeLine], poll
+) -> None:
+    _, board = await setup_board("DI16ac", options=IRQ, **OLD)
+    await poll()
+    board.power_cycle()
+    assert not board.armed
+    await poll()
+    assert board.armed
+    board.set_inputs(1)
+    await until(
+        lambda: hass.states.get("binary_sensor.di16ac_0x40_i0").state == STATE_ON
+    )
+
+
 class _Chip:
     """gpiod.Chip, for a machine with the given controllers."""
 
