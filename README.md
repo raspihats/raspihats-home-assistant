@@ -73,9 +73,9 @@ The DI16ac and DI6acDQ6rly record every input edge in a capture queue on the boa
 - The interrupt jumper on the board selects the GPIO: **GPIO21** from the factory, or GPIO20, 22 or 23. Set the same GPIO in Home Assistant. Several input boards on one stack can share a GPIO.
 - If the GPIO is not available to Home Assistant, the integration logs a warning and reads the capture queue at every poll instead: no edge is lost, changes just arrive at the polling interval.
 - **Off** leaves the capture queue unarmed and polls the inputs only. Use it if the GPIO is needed by something else, since an armed board drives it. With Off, a pulse shorter than the polling interval can be missed (the edge counters still count it).
-- The capture queue needs board firmware 3.0.0 or later. With older firmware the interrupt line is not offered and the inputs are polled.
+- Firmware 2.x works too. There the arming is not stored on the board, so the integration arms it again after every board restart, and an input read releases the line; an edge that arrives during a poll is then picked up by that poll's own read of the queue rather than by the interrupt. Boards whose firmware has no capture queue at all are not offered the interrupt line, and their inputs are polled.
 
-The board disarms its capture queue when it restarts or its watchdog trips; the integration re-arms it at the next poll. Removing the board from Home Assistant disarms it, so no unserved board holds the line low.
+The board disarms its capture queue when it restarts (firmware 3.x also when its watchdog trips); the integration re-arms it at the next poll. Removing the board from Home Assistant disarms it, so no unserved board holds the line low.
 
 ## Coming from the old Raspihats integration
 
