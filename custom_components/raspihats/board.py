@@ -239,7 +239,10 @@ class Board:
             if want is None or have is None or want == have:
                 continue
             _call(write, want)
-            changed.append(f"{name} {have:#x} -> {want:#x}")
+            if name == "watchdog_ms":
+                changed.append(f"watchdog {have} ms -> {want} ms")
+            else:
+                changed.append(f"{name} {have:#x} -> {want:#x}")
         return changed
 
     @property
