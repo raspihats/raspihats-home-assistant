@@ -1,0 +1,13 @@
+{
+  "domain": "raspihats",
+  "name": "Raspihats",
+  "codeowners": ["@raspihats"],
+  "config_flow": true,
+  "documentation": "https://github.com/raspihats/ha-raspihats",
+  "integration_type": "device",
+  "iot_class": "local_polling",
+  "issue_tracker": "https://github.com/raspihats/ha-raspihats/issues",
+  "loggers": ["raspihats"],
+  "requirements": ["raspihats==3.2.0"],
+  "version": "0.1.0"
+}

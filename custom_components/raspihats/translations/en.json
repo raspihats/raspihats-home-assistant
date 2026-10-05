@@ -1,0 +1,79 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Add a Raspihats board",
+        "description": "Pick the I2C-HAT to add. Add each board on the stack separately. I2C has to be enabled on the Raspberry Pi first.",
+        "data": {
+          "board": "Board"
+        }
+      },
+      "address": {
+        "title": "{board} address",
+        "description": "The address set by the board's address jumpers. With no jumpers fitted, a {board} answers at {default}.",
+        "data": {
+          "address": "I2C address"
+        }
+      }
+    },
+    "error": {
+      "bus_unavailable": "The I2C bus /dev/i2c-1 is not available. Enable I2C on the Raspberry Pi, reboot, then try again.",
+      "no_response": "No board answered at this address. Check the address jumpers and that the board is seated on the header.",
+      "wrong_board": "The board at this address reports itself as \"{found}\". Pick that model, or check the address jumpers."
+    },
+    "abort": {
+      "already_configured": "A board at this address is already set up."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Board settings",
+        "description": "Everything except the polling interval is stored on the board itself, so it keeps working when Home Assistant is not running. Only values that change are written to the board.",
+        "data": {
+          "poll_interval": "Polling interval",
+          "watchdog_timeout": "Watchdog timeout",
+          "safe_on": "Outputs switched ON when the watchdog trips",
+          "safe_hold": "Outputs that keep their state when the watchdog trips",
+          "power_on": "Outputs switched ON at power-up",
+          "inverted_inputs": "Inverted inputs"
+        },
+        "data_description": {
+          "poll_interval": "How often the board is read. Inputs that change and change back between two reads are not seen; the edge counters still count them.",
+          "watchdog_timeout": "If the board hears nothing from Home Assistant for this long, it switches its outputs to the safe state below. 0 turns the watchdog off. Note that a restart of Home Assistant that takes longer than this also trips it.",
+          "safe_on": "All other outputs switch OFF when the watchdog trips, except the ones that keep their state.",
+          "safe_hold": "These outputs ignore the watchdog and stay as they were.",
+          "power_on": "The state the outputs take when the board powers up, before Home Assistant is running. All other outputs start OFF.",
+          "inverted_inputs": "The board inverts these inputs before anything else, so their state and edge counters follow the inverted signal."
+        }
+      }
+    },
+    "error": {
+      "watchdog_too_short": "Use 0 (off), or at least {minimum} s and {polls} times the polling interval, so a few slow polls do not trip it."
+    },
+    "abort": {
+      "not_loaded": "The board has to be online to change its settings. Check that it answers, then try again."
+    }
+  },
+  "entity": {
+    "sensor": {
+      "rising_edges": {
+        "name": "{channel} rising edges"
+      },
+      "falling_edges": {
+        "name": "{channel} falling edges"
+      }
+    }
+  },
+  "exceptions": {
+    "not_responding": {
+      "message": "The board is not responding: {error}"
+    },
+    "wrong_board": {
+      "message": "The board at {address} reports itself as \"{found}\", not a {board}. Check the address jumpers, or remove this entry and add the board again."
+    },
+    "write_failed": {
+      "message": "Could not switch {channel}: {error}"
+    }
+  }
+}
