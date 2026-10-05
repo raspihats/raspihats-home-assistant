@@ -94,6 +94,7 @@ Home Assistant's built-in `raspihats` integration (YAML configuration under `swi
 - **"No board answered at this address"**: check the address jumpers and that the board is seated on the header. `i2cdetect -y 1` on the host lists the addresses that answer.
 - **"The interrupt line GPIO21 is not available"** in the log: the GPIO controller is not accessible to Home Assistant (see [Requirements](#requirements)), or another program holds the pin. Inputs keep working through polling.
 - **"GPIO21 stays low after draining every board on it"**: something other than the boards set up here is pulling the line low, such as an input board armed by another program, or a different HAT using the same pin. Move one of them to another GPIO.
+- **A board added from the device list does not show up in that list**: the device list opened from the Raspihats card (*N devices* → **Add device**) does not refresh after the setup flow finishes, so the new board appears only after reloading the page. Boards added from the Raspihats integration page show up straight away. This is in Home Assistant's frontend, not in this integration: the list loads the integration's entries once, when the page opens, and filters devices by them.
 - **Diagnostics**: the board's entry has **Download diagnostics**, with the board model, firmware, stored settings and last readings. Attach it to an [issue](https://github.com/raspihats/raspihats-home-assistant/issues).
 
 ## License
