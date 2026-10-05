@@ -239,16 +239,16 @@ def _options_schema(identity: BoardIdentity) -> vol.Schema:
             )
         ),
     }
-    if identity.outputs:
-        schema[vol.Required(CONF_WATCHDOG_TIMEOUT)] = NumberSelector(
-            NumberSelectorConfig(
-                min=0,
-                max=MAX_WATCHDOG_TIMEOUT,
-                step=1,
-                unit_of_measurement="s",
-                mode=NumberSelectorMode.BOX,
-            )
+    schema[vol.Required(CONF_WATCHDOG_TIMEOUT)] = NumberSelector(
+        NumberSelectorConfig(
+            min=0,
+            max=MAX_WATCHDOG_TIMEOUT,
+            step=0.1,
+            unit_of_measurement="s",
+            mode=NumberSelectorMode.BOX,
         )
+    )
+    if identity.outputs:
         schema[vol.Optional(CONF_SAFE_ON)] = channels(identity.outputs)
         if identity.has_safety_mask:
             schema[vol.Optional(CONF_SAFE_HOLD)] = channels(identity.outputs)
@@ -273,12 +273,14 @@ def _irq_selector() -> SelectSelector:
 def _options_from_settings(
     identity: BoardIdentity, settings: BoardSettings
 ) -> dict[str, Any]:
-    options: dict[str, Any] = {CONF_POLL_INTERVAL: DEFAULT_POLL_INTERVAL}
+    # The watchdog exactly as the board holds it, so that a period the options
+    # would not allow (one left by a test rig, say) is shown, not rounded away.
+    options: dict[str, Any] = {
+        CONF_POLL_INTERVAL: DEFAULT_POLL_INTERVAL,
+        CONF_WATCHDOG_TIMEOUT: (settings.watchdog_ms or 0) / 1000,
+    }
     outputs = identity.outputs
     if outputs:
-        # Whole seconds: the library takes the period as a float, and only
-        # whole seconds survive its conversion back to milliseconds exactly.
-        options[CONF_WATCHDOG_TIMEOUT] = round((settings.watchdog_ms or 0) / 1000)
         options[CONF_SAFE_ON] = mask_to_labels(outputs, settings.safety_value or 0)
         options[CONF_POWER_ON] = mask_to_labels(outputs, settings.power_on_value or 0)
         if settings.safety_mask is not None:
@@ -296,7 +298,7 @@ def _options_from_settings(
 
 
 def _normalize(identity: BoardIdentity, user_input: dict[str, Any]) -> dict[str, Any]:
-    """Store whole numbers as ints, and every channel list even when empty.
+    """Store the polling interval as an int, and every channel list even when empty.
 
     An absent list means "leave the board alone" and an empty one means "no
     channels"; the form leaves a list out when nothing is ticked, which has
@@ -305,7 +307,7 @@ def _normalize(identity: BoardIdentity, user_input: dict[str, Any]) -> dict[str,
     options = dict(user_input)
     options[CONF_POLL_INTERVAL] = int(options[CONF_POLL_INTERVAL])
     if CONF_WATCHDOG_TIMEOUT in options:
-        options[CONF_WATCHDOG_TIMEOUT] = int(options[CONF_WATCHDOG_TIMEOUT])
+        options[CONF_WATCHDOG_TIMEOUT] = round(options[CONF_WATCHDOG_TIMEOUT], 3)
     for key in _options_schema(identity).schema:
         if isinstance(key, vol.Optional):
             options.setdefault(str(key), [])

@@ -6,7 +6,7 @@ Every method here performs I2C transfers and has to run in the executor.
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from typing import Any
 
@@ -106,6 +106,8 @@ class Board:
         self.model = model
         self._hat: Any = None
         self.identity: BoardIdentity | None = None
+        #: The persistent registers as last read or written.
+        self.settings = BoardSettings()
 
     def open(self) -> BoardIdentity:
         """Identify the board and probe its firmware."""
@@ -230,18 +232,20 @@ class Board:
         """Read the persistent registers the board has."""
         hat = self._hat
         identity = self._identity
-        values: dict[str, int] = {}
+        # Every board has the watchdog. The library hands the period over in
+        # seconds; the wire counts milliseconds.
+        values: dict[str, int] = {
+            "watchdog_ms": _call(lambda: round(hat.cwdt.period * 1000))
+        }
         if identity.outputs:
-            # The library hands the period over in seconds; the wire and the
-            # options both count whole milliseconds and seconds.
-            values["watchdog_ms"] = _call(lambda: round(hat.cwdt.period * 1000))
             values["safety_value"] = _call(lambda: hat.dq.safety_value)
             values["power_on_value"] = _call(lambda: hat.dq.power_on_value)
             if identity.has_safety_mask:
                 values["safety_mask"] = _call(lambda: hat.dq.safety_mask)
         if identity.has_input_polarity:
             values["input_polarity"] = _call(lambda: hat.di.polarity)
-        return BoardSettings(**values)
+        self.settings = BoardSettings(**values)
+        return self.settings
 
     def apply_settings(self, desired: BoardSettings) -> list[str]:
         """Write the settings that differ from the board's, and only those.
@@ -258,7 +262,10 @@ class Board:
             ("safety_mask", lambda v: setattr(hat.dq, "safety_mask", v)),
             ("power_on_value", lambda v: setattr(hat.dq, "power_on_value", v)),
             ("input_polarity", lambda v: setattr(hat.di, "polarity", v)),
-            ("watchdog_ms", lambda v: setattr(hat.cwdt, "period", v / 1000)),
+            # The library truncates seconds * 1000 to whole milliseconds, and
+            # e.g. 1.234 * 1000 is 1233.99...; half a millisecond more makes
+            # every value land exactly.
+            ("watchdog_ms", lambda v: setattr(hat.cwdt, "period", (v + 0.5) / 1000)),
         )
         changed = []
         for name, write in writers:
@@ -267,6 +274,7 @@ class Board:
             if want is None or have is None or want == have:
                 continue
             _call(write, want)
+            self.settings = replace(self.settings, **{name: want})
             if name == "watchdog_ms":
                 changed.append(f"watchdog {have} ms -> {want} ms")
             else:

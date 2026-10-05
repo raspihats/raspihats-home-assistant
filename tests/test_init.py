@@ -8,7 +8,11 @@ import logging
 from homeassistant.config_entries import ConfigEntryState
 from homeassistant.const import STATE_OFF, STATE_ON
 from homeassistant.core import HomeAssistant
-from homeassistant.helpers import device_registry as dr, entity_registry as er
+from homeassistant.helpers import (
+    device_registry as dr,
+    entity_registry as er,
+    issue_registry as ir,
+)
 import pytest
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
@@ -210,3 +214,69 @@ async def test_failed_reapply_is_retried(
     board.responding = True
     await poll()
     assert board.writes == [("safety_value", 0b10)]
+
+
+async def test_leftover_short_watchdog(
+    hass: HomeAssistant,
+    bus: FakeBus,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A board arriving with a watchdog shorter than a few polls."""
+    board = bus.add(0x60, FakeBoard("DI6acDQ6rly"))
+    board.cwdt_ms = 200
+    with caplog.at_level(logging.WARNING):
+        entry = await _add_entry(hass, "DI6acDQ6rly", 0x60)
+    assert "too short for polling every 250 ms; polling every 50 ms" in caplog.text
+    assert entry.runtime_data.poll_interval.total_seconds() == 0.05
+    issue = ir.async_get(hass).async_get_issue(
+        "raspihats", f"watchdog_too_short_{entry.entry_id}"
+    )
+    assert issue is not None
+    assert issue.translation_placeholders["watchdog"] == "0.2"
+    # Nothing was written: the board keeps its period until someone decides.
+    assert board.writes == []
+
+    # The settings form shows the period as it is, and will not keep it.
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    suggested = {
+        str(key): key.description["suggested_value"]
+        for key in result["data_schema"].schema
+        if key.description and "suggested_value" in key.description
+    }
+    assert suggested["watchdog_timeout"] == 0.2
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"], suggested
+    )
+    assert result["errors"] == {"watchdog_timeout": "watchdog_too_short"}
+
+    # Turning it off clears the repair and the fast polling.
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"], {**suggested, "watchdog_timeout": 0}
+    )
+    await hass.async_block_till_done()
+    assert board.cwdt_ms == 0
+    assert entry.runtime_data.poll_interval.total_seconds() == 0.25
+    assert (
+        ir.async_get(hass).async_get_issue(
+            "raspihats", f"watchdog_too_short_{entry.entry_id}"
+        )
+        is None
+    )
+
+
+async def test_trip_episode_is_one_warning(
+    hass: HomeAssistant,
+    setup_board: SetupBoard,
+    poll,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    _, board = await setup_board(options=OPTIONS)
+    await poll()
+    with caplog.at_level(logging.WARNING):
+        for _ in range(3):
+            board.trip_watchdog()
+            await poll()
+        await poll()
+        board.trip_watchdog()
+        await poll()
+    assert caplog.text.count("watchdog timed out") == 2

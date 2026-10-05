@@ -215,7 +215,12 @@ async def test_input_board_options(
     entry, _ = await setup_board("DI16ac")
     result = await hass.config_entries.options.async_init(entry.entry_id)
     fields = {str(key) for key in result["data_schema"].schema}
-    assert fields == {"poll_interval", "inverted_inputs", "irq_gpio"}
+    assert fields == {
+        "poll_interval",
+        "watchdog_timeout",
+        "inverted_inputs",
+        "irq_gpio",
+    }
 
 
 async def test_options_need_the_board_online(
@@ -293,3 +298,17 @@ async def test_no_capture_queue_no_interrupt_line(
     result = await _add_input_board(hass, "DI16ac", "0x40")
     assert result["type"] is FlowResultType.CREATE_ENTRY
     assert result["result"].options == {}
+
+
+async def test_watchdog_written_to_the_millisecond(
+    hass: HomeAssistant, setup_board: SetupBoard
+) -> None:
+    entry, board = await setup_board("DQ5rly")
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    # 12.345 * 1000 is 12344.99... in floating point.
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"], {"poll_interval": 250, "watchdog_timeout": 12.345}
+    )
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    await hass.async_block_till_done()
+    assert board.cwdt_ms == 12_345

@@ -6,7 +6,9 @@ import logging
 
 from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers import issue_registry as ir
 
+from .const import DOMAIN
 from .coordinator import RaspihatsConfigEntry, RaspihatsCoordinator
 from .irq import LineError, async_attach
 
@@ -37,6 +39,11 @@ async def async_unload_entry(hass: HomeAssistant, entry: RaspihatsConfigEntry) -
         return False
     await entry.runtime_data.async_disarm()
     return True
+
+
+async def async_remove_entry(hass: HomeAssistant, entry: RaspihatsConfigEntry) -> None:
+    """Drop the repairs raised for a board that is gone."""
+    ir.async_delete_issue(hass, DOMAIN, f"watchdog_too_short_{entry.entry_id}")
 
 
 async def _async_attach_irq(

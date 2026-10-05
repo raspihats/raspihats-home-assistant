@@ -55,14 +55,14 @@ Open the board's entry and choose **Configure**. On first open, the form shows t
 | Setting | Stored on | Notes |
 |---|---|---|
 | Polling interval | Home Assistant | Default 250 ms. Every poll also feeds the board's watchdog. |
-| Watchdog timeout | Board | 0 turns it off. Must cover at least four polls, and 2 s minimum. |
+| Watchdog timeout | Board | 0 turns it off. Must cover at least four polls, and 2 s minimum. On input boards a trip stops edge capture until Home Assistant re-arms it. |
 | Outputs switched ON when the watchdog trips | Board | The rest switch OFF, except those set to keep their state. |
 | Outputs that keep their state when the watchdog trips | Board | |
 | Outputs switched ON at power-up | Board | The rest start OFF. |
 | Inverted inputs | Board | |
 | Interrupt line | Home Assistant | Input boards; see [Interrupts](#interrupts). |
 
-Board settings are written only when they differ from what the board holds, since they live in its EEPROM. They are checked again when Home Assistant starts and when a board restarts, so a replacement board gets the same configuration.
+Board settings are written only when they differ from what the board holds, since they live in its EEPROM. A board that arrives with a watchdog shorter than the polling allows (left by a test rig, say) is reported under **Settings → Repairs** and polled fast enough to keep it fed, until you set its watchdog timeout. They are checked again when Home Assistant starts and when a board restarts, so a replacement board gets the same configuration.
 
 **Choose the watchdog timeout with Home Assistant restarts in mind.** A restart or update that takes longer than the timeout trips the watchdog, and the outputs go to their safe state until Home Assistant is back. For most installations that is the point: what the safe state is for. For loads that should ride through a restart, mark those outputs to keep their state, or use a timeout longer than a restart takes.
 

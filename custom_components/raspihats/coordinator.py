@@ -13,6 +13,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_ADDRESS
 from homeassistant.core import CALLBACK_TYPE, HomeAssistant, callback
 from homeassistant.exceptions import ConfigEntryError, HomeAssistantError
+from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
@@ -41,7 +42,10 @@ from .const import (
     DOMAIN,
     IRQ_GPIOS,
     MANUFACTURER,
+    MIN_POLL_INTERVAL,
+    MIN_WATCHDOG_TIMEOUT,
     PRODUCT_URL,
+    WATCHDOG_POLLS,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -84,6 +88,7 @@ class RaspihatsCoordinator(DataUpdateCoordinator[BoardState]):
         self._counters: set[CounterKey] = set()
         self._writes = 0
         self._polled = False
+        self._tripping = False
         self._settings_due = False
         self._irq_due = False
         # Polls and interrupt drains both read the capture queue; one at a
@@ -116,6 +121,7 @@ class RaspihatsCoordinator(DataUpdateCoordinator[BoardState]):
             await self._async_apply_settings()
             if self.uses_irq:
                 await self._async_arm()
+            self._check_watchdog()
         except WrongBoard as err:
             raise ConfigEntryError(
                 translation_domain=DOMAIN,
@@ -176,16 +182,19 @@ class RaspihatsCoordinator(DataUpdateCoordinator[BoardState]):
                 translation_placeholders={"error": str(err)},
             ) from err
 
-        if state.status & _WATCHDOG_TRIPPED and self.identity.outputs:
+        tripped = bool(state.status & _WATCHDOG_TRIPPED) and bool(self.identity.outputs)
+        if tripped and not self._tripping:
             # The bit survives until read, so on the first poll it records a
             # trip from before Home Assistant (re)connected - a restart of
-            # Home Assistant itself, typically.
+            # Home Assistant itself, typically. A trip on every poll is one
+            # episode, worth one warning.
             self.logger.log(
                 logging.WARNING if self._polled else logging.INFO,
                 "%s: the communication watchdog timed out and the outputs went "
                 "to their safe state",
                 self.name,
             )
+        self._tripping = tripped
         if state.status & _QUEUE_OVERFLOWED and self.uses_irq:
             self.logger.warning(
                 "%s: inputs changed faster than they were read and the board "
@@ -248,6 +257,50 @@ class RaspihatsCoordinator(DataUpdateCoordinator[BoardState]):
         if changed:
             self.logger.info("%s: wrote %s", self.name, ", ".join(changed))
 
+    @callback
+    def _check_watchdog(self) -> None:
+        """Keep a watchdog the options did not set fed, and say it is short.
+
+        A board can arrive with a watchdog period set by a script or a test
+        rig. Shorter than a few polls, it trips between them and the outputs
+        keep dropping to their safe state. The options flow never allows
+        that, so it is reported as a repair, and until it is dealt with the
+        polling speeds up to keep the watchdog fed.
+        """
+        entry = self.config_entry
+        issue_id = f"watchdog_too_short_{entry.entry_id}"
+        watchdog_ms = self.board.settings.watchdog_ms or 0
+        poll_ms = self.poll_interval.total_seconds() * 1000
+        needed_ms = max(MIN_WATCHDOG_TIMEOUT * 1000, WATCHDOG_POLLS * poll_ms)
+        if not watchdog_ms or watchdog_ms >= needed_ms:
+            ir.async_delete_issue(self.hass, DOMAIN, issue_id)
+            return
+        fed_ms = max(MIN_POLL_INTERVAL, watchdog_ms // WATCHDOG_POLLS)
+        if fed_ms < poll_ms:
+            self.poll_interval = timedelta(milliseconds=fed_ms)
+        self.logger.warning(
+            "%s: the board's watchdog is set to %s ms, too short for polling "
+            "every %d ms; polling every %d ms to keep it fed. Set the watchdog "
+            "timeout in the board's settings",
+            self.name,
+            watchdog_ms,
+            poll_ms,
+            self.poll_interval.total_seconds() * 1000,
+        )
+        ir.async_create_issue(
+            self.hass,
+            DOMAIN,
+            issue_id,
+            is_fixable=False,
+            severity=ir.IssueSeverity.WARNING,
+            translation_key="watchdog_too_short",
+            translation_placeholders={
+                "board": entry.title,
+                "watchdog": f"{watchdog_ms / 1000:g}",
+                "minimum": f"{needed_ms / 1000:g}",
+            },
+        )
+
     async def _async_apply_settings(self) -> None:
         desired = settings_from_options(self.identity, self.config_entry.options)
         changed = await self.hass.async_add_executor_job(
@@ -299,9 +352,9 @@ def settings_from_options(
     """Return the board settings the options ask for; absent options touch nothing."""
     outputs = identity.outputs
     values: dict[str, int] = {}
+    if CONF_WATCHDOG_TIMEOUT in options:
+        values["watchdog_ms"] = round(options[CONF_WATCHDOG_TIMEOUT] * 1000)
     if outputs:
-        if CONF_WATCHDOG_TIMEOUT in options:
-            values["watchdog_ms"] = int(options[CONF_WATCHDOG_TIMEOUT] * 1000)
         if CONF_SAFE_ON in options:
             values["safety_value"] = labels_to_mask(outputs, options[CONF_SAFE_ON])
         if CONF_POWER_ON in options:

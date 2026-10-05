@@ -51,7 +51,7 @@
         },
         "data_description": {
           "poll_interval": "How often the board is read. Inputs that change and change back between two reads are not seen; the edge counters still count them.",
-          "watchdog_timeout": "If the board hears nothing from Home Assistant for this long, it switches its outputs to the safe state below. 0 turns the watchdog off. Note that a restart of Home Assistant that takes longer than this also trips it.",
+          "watchdog_timeout": "If the board hears nothing from Home Assistant for this long, a relay board switches its outputs to the safe state below, and an input board stops capturing edges until Home Assistant re-arms it. 0 turns the watchdog off. A restart of Home Assistant that takes longer than this also trips it.",
           "safe_on": "All other outputs switch OFF when the watchdog trips, except the ones that keep their state.",
           "safe_hold": "These outputs ignore the watchdog and stay as they were.",
           "power_on": "The state the outputs take when the board powers up, before Home Assistant is running. All other outputs start OFF.",
@@ -97,6 +97,12 @@
         "gpio23": "GPIO23",
         "off": "Off: poll the inputs only"
       }
+    }
+  },
+  "issues": {
+    "watchdog_too_short": {
+      "title": "{board}: watchdog shorter than the polling allows",
+      "description": "The board's communication watchdog is set to {watchdog} s. Between two polls that is too short: the watchdog would trip and switch the outputs to their safe state over and over. Until this is changed, the board is polled fast enough to keep it fed.\n\nOpen the board's settings (Settings → Devices & services → Raspihats → Configure) and set the watchdog timeout to 0 (off) or to at least {minimum} s."
     }
   }
 }
