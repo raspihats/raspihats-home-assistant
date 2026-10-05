@@ -35,7 +35,7 @@ Home Assistant has to run **on the Raspberry Pi the boards are mounted on**, bec
 With [HACS](https://hacs.xyz):
 
 1. In HACS, open the menu (⋮) and choose **Custom repositories**.
-2. Add `https://github.com/raspihats/ha-raspihats` with the type **Integration**.
+2. Add `https://github.com/raspihats/raspihats-home-assistant` with the type **Integration**.
 3. Find **Raspihats** in HACS, download it, and restart Home Assistant.
 
 Manually: copy `custom_components/raspihats` into the `custom_components` folder of your Home Assistant configuration, then restart.
@@ -94,7 +94,7 @@ Home Assistant's built-in `raspihats` integration (YAML configuration under `swi
 - **"No board answered at this address"**: check the address jumpers and that the board is seated on the header. `i2cdetect -y 1` on the host lists the addresses that answer.
 - **"The interrupt line GPIO21 is not available"** in the log: the GPIO controller is not accessible to Home Assistant (see [Requirements](#requirements)), or another program holds the pin. Inputs keep working through polling.
 - **"GPIO21 stays low after draining every board on it"**: something other than the boards set up here is pulling the line low, such as an input board armed by another program, or a different HAT using the same pin. Move one of them to another GPIO.
-- **Diagnostics**: the board's entry has **Download diagnostics**, with the board model, firmware, stored settings and last readings. Attach it to an [issue](https://github.com/raspihats/ha-raspihats/issues).
+- **Diagnostics**: the board's entry has **Download diagnostics**, with the board model, firmware, stored settings and last readings. Attach it to an [issue](https://github.com/raspihats/raspihats-home-assistant/issues).
 
 ## License
 

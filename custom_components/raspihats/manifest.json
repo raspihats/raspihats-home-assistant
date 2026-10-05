@@ -3,10 +3,10 @@
   "name": "Raspihats",
   "codeowners": ["@raspihats"],
   "config_flow": true,
-  "documentation": "https://github.com/raspihats/ha-raspihats",
+  "documentation": "https://github.com/raspihats/raspihats-home-assistant",
   "integration_type": "device",
   "iot_class": "local_polling",
-  "issue_tracker": "https://github.com/raspihats/ha-raspihats/issues",
+  "issue_tracker": "https://github.com/raspihats/raspihats-home-assistant/issues",
   "loggers": ["raspihats"],
   "requirements": ["gpiod>=2.2.1", "raspihats==3.2.0"],
   "version": "0.1.0"
