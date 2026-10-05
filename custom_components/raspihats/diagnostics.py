@@ -29,6 +29,11 @@ async def async_get_config_entry_diagnostics(
         "identity": asdict(coordinator.identity),
         "settings": settings,
         "last_update_success": coordinator.last_update_success,
+        "interrupts": {
+            "gpio": coordinator.irq_gpio,
+            "armed": coordinator.uses_irq,
+            "line_error": coordinator.irq_line_error,
+        },
         "state": {
             "inputs": state.inputs,
             "outputs": state.outputs,

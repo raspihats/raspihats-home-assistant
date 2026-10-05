@@ -18,6 +18,9 @@ from raspihats.protocol import BOARDS, board_info
 #: opposed to answering with a frame that fails the check.
 _NO_RESPONSE = "no response"
 
+#: Entries the board's capture queue holds; it drops the oldest beyond that.
+_CAPTURE_QUEUE_DEPTH = 128
+
 
 class BoardError(Exception):
     """The board did not answer, or its answer was unusable."""
@@ -56,16 +59,24 @@ class BoardIdentity:
     outputs: tuple[str, ...]
     has_safety_mask: bool
     has_input_polarity: bool
+    #: The capture queue with its arming bit (firmware 3.0.0 and later), which
+    #: is what drives the interrupt line.
+    has_irq: bool = False
 
 
 @dataclass(frozen=True)
 class BoardState:
-    """One poll: channel bitmasks, the counters asked for, the status word."""
+    """One poll: channel bitmasks, the counters asked for, the status word.
+
+    ``captures`` holds the input states at each edge the board captured
+    since the last read, oldest first; ``inputs`` is the state after them.
+    """
 
     inputs: int | None
     outputs: int | None
     status: int
     counters: Mapping[CounterKey, int] = field(default_factory=dict)
+    captures: tuple[int, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -112,18 +123,24 @@ class Board:
             outputs=outputs,
             has_safety_mask=bool(outputs) and _supported(lambda: hat.dq.safety_mask),
             has_input_polarity=bool(inputs) and _supported(lambda: hat.di.polarity),
+            has_irq=info.has_irq and _supported(lambda: hat.di.irq_reg.global_enable),
         )
         return self.identity
 
-    def read_state(self, counters: Iterable[CounterKey] = ()) -> BoardState:
+    def read_state(
+        self, counters: Iterable[CounterKey] = (), drain: bool = False
+    ) -> BoardState:
         """Read the channel states, the status word and the given counters.
 
-        Any valid frame feeds the board's communication watchdog, so this
-        poll is also what keeps the outputs out of their safe state.
+        With ``drain``, the capture queue is emptied first, so the edges come
+        before the states they led to. Any valid frame feeds the board's
+        communication watchdog, so this poll is also what keeps the outputs
+        out of their safe state.
         """
         hat = self._hat
         identity = self._identity
         status = _call(lambda: hat.status.value)
+        captures = tuple(self.drain_captures()) if drain else ()
         inputs = outputs = None
         if identity.inputs:
             inputs = _call(lambda: hat.di.value) & _mask(identity.inputs)
@@ -133,7 +150,48 @@ class Board:
         for index, edge in counters:
             source = hat.di.r_counters if edge is Edge.RISING else hat.di.f_counters
             values[(index, edge)] = _call(source.__getitem__, index)
-        return BoardState(inputs, outputs, status, values)
+        return BoardState(inputs, outputs, status, values, captures)
+
+    def arm_irq(self) -> list[str]:
+        """Capture every edge of every input, then arm the capture queue.
+
+        The edge masks live in EEPROM, so they are written only when they
+        differ. The arming bit is volatile and clears on a board reset or a
+        watchdog trip, which is why this runs again after either. Arming comes
+        last, so the board never captures with half-set masks.
+        """
+        registers = self._hat.di.irq_reg
+        everything = _mask(self._identity.inputs)
+        changed = []
+        for name in ("rising_edge_control", "falling_edge_control"):
+            have = _call(getattr, registers, name)
+            if have != everything:
+                _call(setattr, registers, name, everything)
+                changed.append(f"{name} {have:#x} -> {everything:#x}")
+        _call(setattr, registers, "capture", 0)
+        _call(setattr, registers, "global_enable", 1)
+        return changed
+
+    def disarm_irq(self) -> None:
+        """Disarm: the queue is dropped and the interrupt line released."""
+        _call(setattr, self._hat.di.irq_reg, "global_enable", 0)
+
+    def drain_captures(self) -> list[int]:
+        """Empty the capture queue; the input states at each edge, oldest first.
+
+        Each entry is ``(states << 16) | edges``, and 0 means empty. Reading
+        is bounded by the queue depth, so an input chattering faster than
+        the bus can read stops here and continues on the next drain.
+        """
+        registers = self._hat.di.irq_reg
+        everything = _mask(self._identity.inputs)
+        states = []
+        for _ in range(_CAPTURE_QUEUE_DEPTH):
+            capture = _call(getattr, registers, "capture")
+            if not capture:
+                break
+            states.append(capture >> 16 & everything)
+        return states
 
     def write_output(self, index: int, value: bool) -> None:
         """Set one output; single-channel writes leave the others alone."""

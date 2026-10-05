@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import replace
 from datetime import timedelta
 import logging
@@ -31,6 +31,7 @@ from .board import (
 from .const import (
     CONF_BOARD,
     CONF_INVERTED_INPUTS,
+    CONF_IRQ_GPIO,
     CONF_POLL_INTERVAL,
     CONF_POWER_ON,
     CONF_SAFE_HOLD,
@@ -38,6 +39,7 @@ from .const import (
     CONF_WATCHDOG_TIMEOUT,
     DEFAULT_POLL_INTERVAL,
     DOMAIN,
+    IRQ_GPIOS,
     MANUFACTURER,
     PRODUCT_URL,
 )
@@ -50,6 +52,7 @@ _RESTARTED = (
     | StatusWordBits.IWD_RESET.value
 )
 _WATCHDOG_TRIPPED = StatusWordBits.CWDT_TIMEOUT.value
+_QUEUE_OVERFLOWED = StatusWordBits.DI_IRQ_CAPTURE_QUEUE_FULL.value
 
 type RaspihatsConfigEntry = ConfigEntry[RaspihatsCoordinator]
 
@@ -74,10 +77,23 @@ class RaspihatsCoordinator(DataUpdateCoordinator[BoardState]):
             milliseconds=entry.options.get(CONF_POLL_INTERVAL, DEFAULT_POLL_INTERVAL)
         )
         self.board = Board(entry.data[CONF_ADDRESS], entry.data[CONF_BOARD])
+        #: GPIO of the interrupt line the options ask for, None for off.
+        self.irq_gpio = IRQ_GPIOS.get(entry.options.get(CONF_IRQ_GPIO, ""))
+        #: Why the interrupt GPIO could not be used, for diagnostics.
+        self.irq_line_error: str | None = None
         self._counters: set[CounterKey] = set()
         self._writes = 0
         self._polled = False
         self._settings_due = False
+        self._irq_due = False
+        # Polls and interrupt drains both read the capture queue; one at a
+        # time keeps the edges in the order the board captured them.
+        self._io = asyncio.Lock()
+
+    @property
+    def uses_irq(self) -> bool:
+        """Whether the board's capture queue is armed and read."""
+        return self.irq_gpio is not None and self.identity.has_irq
 
     @property
     def device_info(self) -> DeviceInfo:
@@ -98,6 +114,8 @@ class RaspihatsCoordinator(DataUpdateCoordinator[BoardState]):
         try:
             self.identity = await self.hass.async_add_executor_job(self.board.open)
             await self._async_apply_settings()
+            if self.uses_irq:
+                await self._async_arm()
         except WrongBoard as err:
             raise ConfigEntryError(
                 translation_domain=DOMAIN,
@@ -132,17 +150,25 @@ class RaspihatsCoordinator(DataUpdateCoordinator[BoardState]):
         """Read the board."""
         writes = self._writes
         try:
-            state = await self.hass.async_add_executor_job(
-                self.board.read_state, tuple(self._counters)
-            )
-            if self._polled and state.status & _RESTARTED:
-                self.logger.warning("%s restarted (power loss or reset)", self.name)
-                # Possibly a replacement board, with factory settings. The
-                # status bit is gone once read, so remember until it is done.
-                self._settings_due = True
-            if self._settings_due:
-                await self._async_apply_settings()
-                self._settings_due = False
+            async with self._io:
+                state = await self.hass.async_add_executor_job(
+                    self.board.read_state, tuple(self._counters), self.uses_irq
+                )
+                if self._polled and state.status & _RESTARTED:
+                    self.logger.warning("%s restarted (power loss or reset)", self.name)
+                    # Possibly a replacement board, with factory settings. The
+                    # status bit is gone once read, so remember until done.
+                    self._settings_due = True
+                if self._polled and state.status & (_RESTARTED | _WATCHDOG_TRIPPED):
+                    # Both leave the capture queue disarmed.
+                    self._irq_due = True
+                if self._settings_due:
+                    await self._async_apply_settings()
+                    self._settings_due = False
+                if self._irq_due:
+                    if self.uses_irq:
+                        await self._async_arm()
+                    self._irq_due = False
         except BoardError as err:
             raise UpdateFailed(
                 translation_domain=DOMAIN,
@@ -160,13 +186,64 @@ class RaspihatsCoordinator(DataUpdateCoordinator[BoardState]):
                 "to their safe state",
                 self.name,
             )
+        if state.status & _QUEUE_OVERFLOWED and self.uses_irq:
+            self.logger.warning(
+                "%s: inputs changed faster than they were read and the board "
+                "dropped its oldest captured edges; the input states are "
+                "current again",
+                self.name,
+            )
         self._polled = True
+        self._replay(state.captures)
 
         if writes != self._writes and self.data is not None:
             # A write overlapped this read, so its output states may predate
             # the write; keep the ones the write left behind.
             state = replace(state, outputs=self.data.outputs)
         return state
+
+    async def async_drain(self) -> None:
+        """Read the captured edges; called when the interrupt line asserts."""
+        if self.data is None:
+            return
+        try:
+            async with self._io:
+                captures = await self.hass.async_add_executor_job(
+                    self.board.drain_captures
+                )
+        except BoardError as err:
+            # The next poll reports the board as unavailable if it stays so.
+            self.logger.debug("%s: reading captured edges failed: %s", self.name, err)
+            return
+        self._replay(captures)
+
+    async def async_disarm(self) -> None:
+        """Release the interrupt line, so no unserved board holds it low."""
+        if not self.uses_irq:
+            return
+        try:
+            async with self._io:
+                await self.hass.async_add_executor_job(self.board.disarm_irq)
+        except BoardError as err:
+            self.logger.debug("%s: disarming failed: %s", self.name, err)
+
+    @callback
+    def _replay(self, captures: Sequence[int]) -> None:
+        """Show every captured edge in order.
+
+        A pulse shorter than a poll arrives as two captures, so it reaches
+        Home Assistant as on and then off rather than not at all.
+        """
+        for inputs in captures:
+            if self.data is None or inputs == self.data.inputs:
+                continue
+            self.data = replace(self.data, inputs=inputs)
+            self.async_update_listeners()
+
+    async def _async_arm(self) -> None:
+        changed = await self.hass.async_add_executor_job(self.board.arm_irq)
+        if changed:
+            self.logger.info("%s: wrote %s", self.name, ", ".join(changed))
 
     async def _async_apply_settings(self) -> None:
         desired = settings_from_options(self.identity, self.config_entry.options)

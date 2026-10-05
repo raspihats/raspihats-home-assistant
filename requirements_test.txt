@@ -1,3 +1,4 @@
+gpiod>=2.2.1
 pytest-homeassistant-custom-component==0.13.368
 raspihats==3.2.0
 ruff

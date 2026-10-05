@@ -2,6 +2,7 @@
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 testpaths = ["tests"]
+markers = ["real_polling: keep the polling loop running, in real time"]
 
 [tool.ruff]
 target-version = "py314"

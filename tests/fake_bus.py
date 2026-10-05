@@ -7,9 +7,14 @@ than a mock of them.
 
 from __future__ import annotations
 
-from raspihats.protocol import BOARDS, Command, Frame, StatusWordBits
+from collections.abc import Callable
+import contextlib
+import os
+
+from raspihats.protocol import BOARDS, Command, Frame, IrqRegister, StatusWordBits
 
 FILLER = 0xEE
+QUEUE_DEPTH = 128
 
 
 def _u32(value: int) -> list[int]:
@@ -23,8 +28,9 @@ def _from_u32(data: list[int]) -> int:
 class FakeBoard:
     """One I2C-HAT: channel state plus the persistent registers.
 
-    ``safety_mask`` and ``polarity`` select whether the firmware has those
-    registers; without them it answers filler, like older firmware does.
+    ``safety_mask``, ``polarity`` and ``irq_enable`` select whether the
+    firmware has those registers; without them it answers filler, like older
+    firmware does.
     """
 
     def __init__(
@@ -34,8 +40,17 @@ class FakeBoard:
         *,
         safety_mask: bool = True,
         polarity: bool = True,
+        irq_enable: bool = True,
     ) -> None:
         info = BOARDS[model]
+        self.has_irq = info.has_irq
+        self.irq_enable = irq_enable
+        self.rising_mask = 0
+        self.falling_mask = 0
+        self.armed = False
+        self.queue: list[int] = []
+        #: Called when this board starts pulling the interrupt line low.
+        self.on_assert: Callable[[], None] | None = None
         self.board_name = info.board_name
         self.firmware = firmware
         self.di_count = info.channel_count("di")
@@ -56,11 +71,37 @@ class FakeBoard:
         #: Persistent writes, as (register, value), to check write-on-diff.
         self.writes: list[tuple[str, int]] = []
 
+    @property
+    def line_asserted(self) -> bool:
+        """The interrupt line is low exactly while armed with captures pending."""
+        return self.armed and bool(self.queue)
+
+    def set_inputs(self, value: int) -> None:
+        """Drive the inputs: counts the edges and captures them if armed."""
+        changed = value ^ self.inputs
+        self.inputs = value
+        for index in range(self.di_count):
+            if changed >> index & 1:
+                counts = self.rising if value >> index & 1 else self.falling
+                counts[index] += 1
+        edges = (changed & value & self.rising_mask) | (
+            changed & ~value & self.falling_mask
+        )
+        if self.armed and edges:
+            was_asserted = self.line_asserted
+            if len(self.queue) == QUEUE_DEPTH:
+                self.queue.pop(0)
+                self.status |= StatusWordBits.DI_IRQ_CAPTURE_QUEUE_FULL.value
+            self.queue.append(value << 16 | edges)
+            if not was_asserted and self.on_assert is not None:
+                self.on_assert()
+
     def trip_watchdog(self) -> None:
         """What the firmware does when the watchdog period runs out."""
         mask = self.safety_mask if self.safety_mask is not None else -1
         self.outputs = (self.outputs & ~mask) | (self.safety_value & mask)
         self.status |= StatusWordBits.CWDT_TIMEOUT.value
+        self._disarm()
 
     def power_cycle(self) -> None:
         """Power loss: outputs to the power-on value, counters to zero."""
@@ -68,6 +109,40 @@ class FakeBoard:
         self.rising = [0] * self.di_count
         self.falling = [0] * self.di_count
         self.status |= StatusWordBits.POR_RESET.value
+        self._disarm()
+
+    def _disarm(self) -> None:
+        self.armed = False
+        self.queue.clear()
+
+    def _irq(self, cmd: Command, data: list[int]) -> list[int] | None:
+        register = IrqRegister(data[0])
+        if register is IrqRegister.DI_GLOBAL_ENABLE and not self.irq_enable:
+            return None
+        if cmd is Command.IRQ_SET_REG:
+            value = _from_u32(data[1:])
+            match register:
+                case IrqRegister.DI_RISING_EDGE_CONTROL:
+                    self.rising_mask = self._persist("rising_mask", data[1:])
+                case IrqRegister.DI_FALLING_EDGE_CONTROL:
+                    self.falling_mask = self._persist("falling_mask", data[1:])
+                case IrqRegister.DI_CAPTURE:
+                    self.queue.clear()
+                case IrqRegister.DI_GLOBAL_ENABLE:
+                    self.armed = bool(value)
+                    if not value:
+                        self.queue.clear()
+            return data
+        match register:
+            case IrqRegister.DI_RISING_EDGE_CONTROL:
+                value = self.rising_mask
+            case IrqRegister.DI_FALLING_EDGE_CONTROL:
+                value = self.falling_mask
+            case IrqRegister.DI_CAPTURE:
+                value = self.queue.pop(0) if self.queue else 0
+            case IrqRegister.DI_GLOBAL_ENABLE:
+                value = int(self.armed)
+        return [register.value, *_u32(value)]
 
     def handle(self, cmd: Command, data: list[int]) -> list[int] | None:
         """Answer one request; None means the firmware lacks the command."""
@@ -86,6 +161,8 @@ class FakeBoard:
             case Command.CWDT_SET_PERIOD:
                 self.cwdt_ms = self._persist("cwdt_ms", data)
                 return data
+        if self.has_irq and cmd in (Command.IRQ_GET_REG, Command.IRQ_SET_REG):
+            return self._irq(cmd, data)
         if self.di_count:
             match cmd:
                 case Command.DI_GET_ALL_CHANNEL_STATES:
@@ -138,11 +215,22 @@ class FakeBus:
 
     def __init__(self) -> None:
         self.boards: dict[int, FakeBoard] = {}
+        self.lines: list[FakeLine] = []
         self._answers: dict[int, list[int]] = {}
 
     def add(self, address: int, board: FakeBoard) -> FakeBoard:
         self.boards[address] = board
+        board.on_assert = self._asserted
         return board
+
+    @property
+    def line_asserted(self) -> bool:
+        """The shared interrupt line: wired-OR of every board on it."""
+        return any(board.line_asserted for board in self.boards.values())
+
+    def _asserted(self) -> None:
+        for line in self.lines:
+            line.fire()
 
     def _board(self, address: int) -> FakeBoard:
         board = self.boards.get(address)
@@ -173,3 +261,40 @@ class FakeBus:
 
     def close(self) -> None:
         """Nothing to release."""
+
+
+class FakeLine:
+    """Stands in for the GPIO the boards pull low.
+
+    Its file descriptor is a real pipe, so Home Assistant's event loop
+    watches it exactly as it watches the GPIO's.
+    """
+
+    def __init__(self, bus: FakeBus, offset: int) -> None:
+        self.bus = bus
+        self.offset = offset
+        self.released = False
+        self._read, self._write = os.pipe()
+        os.set_blocking(self._read, False)
+        bus.lines.append(self)
+
+    @property
+    def fd(self) -> int:
+        return self._read
+
+    def asserted(self) -> bool:
+        return self.bus.line_asserted
+
+    def fire(self) -> None:
+        """An edge on the line."""
+        os.write(self._write, b"\0")
+
+    def clear_events(self) -> None:
+        with contextlib.suppress(BlockingIOError):
+            os.read(self._read, 4096)
+
+    def release(self) -> None:
+        self.released = True
+        self.bus.lines.remove(self)
+        os.close(self._read)
+        os.close(self._write)

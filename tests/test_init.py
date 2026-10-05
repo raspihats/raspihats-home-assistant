@@ -167,6 +167,7 @@ async def test_watchdog_trip_shows_safe_state(
     assert hass.states.get("switch.di6acdq6rly_0x60_q5").state == STATE_ON
 
 
+@pytest.mark.real_polling
 async def test_polling_keeps_its_interval(
     hass: HomeAssistant, setup_board: SetupBoard
 ) -> None:

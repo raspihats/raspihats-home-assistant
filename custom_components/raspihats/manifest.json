@@ -8,6 +8,6 @@
   "iot_class": "local_polling",
   "issue_tracker": "https://github.com/raspihats/ha-raspihats/issues",
   "loggers": ["raspihats"],
-  "requirements": ["raspihats==3.2.0"],
+  "requirements": ["gpiod>=2.2.1", "raspihats==3.2.0"],
   "version": "0.1.0"
 }

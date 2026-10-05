@@ -35,13 +35,17 @@ from .board import (
 from .const import (
     CONF_BOARD,
     CONF_INVERTED_INPUTS,
+    CONF_IRQ_GPIO,
     CONF_POLL_INTERVAL,
     CONF_POWER_ON,
     CONF_SAFE_HOLD,
     CONF_SAFE_ON,
     CONF_WATCHDOG_TIMEOUT,
+    DEFAULT_IRQ_GPIO,
     DEFAULT_POLL_INTERVAL,
     DOMAIN,
+    IRQ_GPIOS,
+    IRQ_OFF,
     MAX_POLL_INTERVAL,
     MAX_WATCHDOG_TIMEOUT,
     MIN_POLL_INTERVAL,
@@ -53,13 +57,14 @@ from .coordinator import RaspihatsConfigEntry
 
 
 class RaspihatsConfigFlow(ConfigFlow, domain=DOMAIN):
-    """Add one board: pick the model, then its address."""
+    """Add one board: the model, its address, and for input boards the interrupt line."""
 
     VERSION = 1
 
     def __init__(self) -> None:
         """Initialize the flow."""
         self._model = SUPPORTED_BOARDS[0]
+        self._address = 0
 
     @staticmethod
     @callback
@@ -104,7 +109,7 @@ class RaspihatsConfigFlow(ConfigFlow, domain=DOMAIN):
             self._abort_if_unique_id_configured()
             board = Board(address, self._model)
             try:
-                await self.hass.async_add_executor_job(board.open)
+                identity = await self.hass.async_add_executor_job(board.open)
             except BusUnavailable:
                 errors["base"] = "bus_unavailable"
             except WrongBoard as err:
@@ -113,10 +118,10 @@ class RaspihatsConfigFlow(ConfigFlow, domain=DOMAIN):
             except BoardError:
                 errors["base"] = "no_response"
             else:
-                return self.async_create_entry(
-                    title=f"{self._model} 0x{address:02X}",
-                    data={CONF_BOARD: self._model, CONF_ADDRESS: address},
-                )
+                self._address = address
+                if identity.has_irq:
+                    return await self.async_step_interrupts()
+                return self._async_create()
 
         return self.async_show_form(
             step_id="address",
@@ -135,6 +140,29 @@ class RaspihatsConfigFlow(ConfigFlow, domain=DOMAIN):
             ),
             errors=errors,
             description_placeholders=placeholders,
+        )
+
+    async def async_step_interrupts(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Choose the GPIO the board signals input changes on."""
+        if user_input is not None:
+            return self._async_create({CONF_IRQ_GPIO: user_input[CONF_IRQ_GPIO]})
+        return self.async_show_form(
+            step_id="interrupts",
+            data_schema=self.add_suggested_values_to_schema(
+                vol.Schema({vol.Required(CONF_IRQ_GPIO): _irq_selector()}),
+                {CONF_IRQ_GPIO: DEFAULT_IRQ_GPIO},
+            ),
+            description_placeholders={"board": self._model},
+        )
+
+    @callback
+    def _async_create(self, options: dict[str, Any] | None = None) -> ConfigFlowResult:
+        return self.async_create_entry(
+            title=f"{self._model} 0x{self._address:02X}",
+            data={CONF_BOARD: self._model, CONF_ADDRESS: self._address},
+            options=options or {},
         )
 
 
@@ -165,18 +193,19 @@ class RaspihatsOptionsFlow(OptionsFlowWithReload):
             else:
                 return self.async_create_entry(data=_normalize(identity, user_input))
             suggested = user_input
-        elif entry.options:
-            suggested = dict(entry.options)
         else:
-            # First visit: start from what the board holds now, so saving
-            # without changes writes nothing to it.
+            # Start from what the board holds, so that saving without changes
+            # writes nothing to it; the options saved before take precedence.
             try:
                 settings = await self.hass.async_add_executor_job(
                     coordinator.board.read_settings
                 )
             except BoardError:
                 return self.async_abort(reason="not_loaded")
-            suggested = _options_from_settings(identity, settings)
+            suggested = {
+                **_options_from_settings(identity, settings),
+                **entry.options,
+            }
 
         return self.async_show_form(
             step_id="init",
@@ -226,7 +255,19 @@ def _options_schema(identity: BoardIdentity) -> vol.Schema:
         schema[vol.Optional(CONF_POWER_ON)] = channels(identity.outputs)
     if identity.has_input_polarity:
         schema[vol.Optional(CONF_INVERTED_INPUTS)] = channels(identity.inputs)
+    if identity.has_irq:
+        schema[vol.Required(CONF_IRQ_GPIO)] = _irq_selector()
     return vol.Schema(schema)
+
+
+def _irq_selector() -> SelectSelector:
+    return SelectSelector(
+        SelectSelectorConfig(
+            options=[*IRQ_GPIOS, IRQ_OFF],
+            mode=SelectSelectorMode.DROPDOWN,
+            translation_key=CONF_IRQ_GPIO,
+        )
+    )
 
 
 def _options_from_settings(
@@ -249,6 +290,8 @@ def _options_from_settings(
         options[CONF_INVERTED_INPUTS] = mask_to_labels(
             identity.inputs, settings.input_polarity
         )
+    if identity.has_irq:
+        options[CONF_IRQ_GPIO] = IRQ_OFF
     return options
 
 

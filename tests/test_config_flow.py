@@ -132,6 +132,7 @@ async def test_options_start_from_the_board(
         "safe_hold": ["Q5"],
         "power_on": ["Q0"],
         "inverted_inputs": [],
+        "irq_gpio": "off",
     }
 
     # Saving what was shown leaves the board's EEPROM alone.
@@ -151,7 +152,8 @@ async def test_options_change_the_board(
     result = await hass.config_entries.options.async_init(entry.entry_id)
     # Nothing ticked: the form leaves the lists out entirely.
     result = await hass.config_entries.options.async_configure(
-        result["flow_id"], {"poll_interval": 500, "watchdog_timeout": 10}
+        result["flow_id"],
+        {"poll_interval": 500, "watchdog_timeout": 10, "irq_gpio": "off"},
     )
     assert result["type"] is FlowResultType.CREATE_ENTRY
     assert entry.options == {
@@ -161,6 +163,7 @@ async def test_options_change_the_board(
         "safe_hold": [],
         "power_on": [],
         "inverted_inputs": [],
+        "irq_gpio": "off",
     }
     await hass.async_block_till_done()
     # The entry reloaded and wrote the only value that changed.
@@ -189,7 +192,11 @@ async def test_options_follow_the_firmware(
     hass: HomeAssistant, setup_board: SetupBoard
 ) -> None:
     entry, _ = await setup_board(
-        "DI6acDQ6rly", firmware=(2, 2, 0), safety_mask=False, polarity=False
+        "DI6acDQ6rly",
+        firmware=(2, 2, 0),
+        safety_mask=False,
+        polarity=False,
+        irq_enable=False,
     )
     result = await hass.config_entries.options.async_init(entry.entry_id)
     fields = {str(key) for key in result["data_schema"].schema}
@@ -202,7 +209,7 @@ async def test_input_board_options(
     entry, _ = await setup_board("DI16ac")
     result = await hass.config_entries.options.async_init(entry.entry_id)
     fields = {str(key) for key in result["data_schema"].schema}
-    assert fields == {"poll_interval", "inverted_inputs"}
+    assert fields == {"poll_interval", "inverted_inputs", "irq_gpio"}
 
 
 async def test_options_need_the_board_online(
@@ -231,3 +238,43 @@ async def test_options_board_drops_off_while_reading(
     result = await hass.config_entries.options.async_init(entry.entry_id)
     assert result["type"] is FlowResultType.ABORT
     assert result["reason"] == "not_loaded"
+
+
+async def _add_input_board(hass: HomeAssistant, model: str, address: str) -> dict:
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN, context={"source": SOURCE_USER}
+    )
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {"board": model}
+    )
+    return await hass.config_entries.flow.async_configure(
+        result["flow_id"], {"address": address}
+    )
+
+
+@pytest.mark.usefixtures("no_setup")
+async def test_input_board_asks_for_the_interrupt_line(
+    hass: HomeAssistant, bus: FakeBus
+) -> None:
+    bus.add(0x40, FakeBoard("DI16ac"))
+    result = await _add_input_board(hass, "DI16ac", "0x40")
+    assert result["type"] is FlowResultType.FORM
+    assert result["step_id"] == "interrupts"
+    assert _suggested(result) == {"irq_gpio": "gpio21"}
+
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {"irq_gpio": "gpio20"}
+    )
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert result["data"] == {"board": "DI16ac", "address": 0x40}
+    assert result["result"].options == {"irq_gpio": "gpio20"}
+
+
+@pytest.mark.usefixtures("no_setup")
+async def test_old_input_firmware_skips_the_interrupt_line(
+    hass: HomeAssistant, bus: FakeBus
+) -> None:
+    bus.add(0x40, FakeBoard("DI16ac", firmware=(2, 2, 0), irq_enable=False))
+    result = await _add_input_board(hass, "DI16ac", "0x40")
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert result["result"].options == {}

@@ -15,6 +15,14 @@ CONF_SAFE_ON: Final = "safe_on"
 CONF_SAFE_HOLD: Final = "safe_hold"
 CONF_POWER_ON: Final = "power_on"
 CONF_INVERTED_INPUTS: Final = "inverted_inputs"
+CONF_IRQ_GPIO: Final = "irq_gpio"
+
+#: Interrupt line choices. The DI boards route their interrupt output to
+#: GPIO21 through a bridged jumper pad; GPIO20, 22 and 23 are the alternative
+#: pads, for stacks where GPIO21 is taken.
+IRQ_OFF: Final = "off"
+IRQ_GPIOS: Final = {"gpio21": 21, "gpio20": 20, "gpio22": 22, "gpio23": 23}
+DEFAULT_IRQ_GPIO: Final = "gpio21"
 
 #: Milliseconds. Fast enough that a push button registers; the bus cost is
 #: two or three short frames per board per poll.
